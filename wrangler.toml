@@ -1,0 +1,12 @@
+name = "email-resender"
+main = "index.js"
+compatibility_date = "2000-01-01"
+
+# turn off the public *.workers.dev URL (optional, but cleaner)
+workers_dev = false
+preview_urls = false
+
+# log to cloudflare's dashboard
+[observability.logs]
+enabled = true
+
