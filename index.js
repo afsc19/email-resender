@@ -116,7 +116,7 @@ export default {
           to: AUTHORIZED_SENDER,
           subject: `Missing ${MAGIC_PREFIX} instructions in body from `+message.from+" to "+message.to+": " + subject,
           text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\nBody:\n" + cleanBody,
-          html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<bt>\nBody:\n<br>\n" + cleanHTML,
+          html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
           attachments: attachments.length > 0 ? attachments : undefined,
         }, env));
       return;
@@ -146,7 +146,7 @@ export default {
         to: AUTHORIZED_SENDER,
         subject: "Email sent From "+targetFrom+" to "+targetTo+": "+ subject,
         text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\nBody:\n" + cleanBody,
-        html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<bt>\nBody:\n<br>\n" + cleanHTML,
+        html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
         attachments: attachments.length > 0 ? attachments : undefined,
       }, env));
   },
