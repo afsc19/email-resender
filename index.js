@@ -1,20 +1,114 @@
 import PostalMime from 'postal-mime';
 
 export default {
-  // send an email using resend.com's API
   async sendEmail(body, env) {
-    const resendResponse = await fetch("https://api.resend.com/emails", {
+    const { from, to, cc, bcc, subject, text, html } = body;
+    const authHeader = "Basic " + btoa(`${env.STALWART_USER}:${env.STALWART_PASS}`);
+
+    // fetch accountId
+    const sessionRes = await fetch(`https://${env.STALWART_ENDPOINT}/.well-known/jmap`, {
+      headers: { "Authorization": authHeader }
+    });
+    const session = await sessionRes.json();
+    const accountId = session.primaryAccounts["urn:ietf:params:jmap:submission"];
+
+    // fetch mailboxes and identitities
+    const detailsRes = await fetch(`https://${env.STALWART_ENDPOINT}/jmap/`, {
+      method: "POST",
+      headers: { "Authorization": authHeader, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        using: ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"],
+        methodCalls: [
+          ["Mailbox/get", { accountId: accountId }, "0"],
+          ["Identity/get", { accountId: accountId }, "1"]
+        ]
+      })
+    });
+    const detailsData = await detailsRes.json();
+
+    // mailbox id
+    const mailboxes = detailsData.methodResponses[0][1].list;
+    const targetFolder = mailboxes.find(m => m.role === "drafts" || m.role === "outbox") || mailboxes[0]; // basically use drafts
+    const targetMailboxId = targetFolder.id;
+
+    // identity id
+    const identities = detailsData.methodResponses[1][1].list;
+    const identityId = identities[0].id; // Primary identity ID
+
+
+    // convert recipients to arrays
+    const toArray = Array.isArray(to)
+      ? to.map(e => ({ email: e }))
+      : [{ email: to }];
+    const ccArray = cc
+      ? ( Array.isArray(cc)
+          ? cc.map(e => ({ email: e }))
+          : [{ email: cc }] )
+      : undefined;
+    const bccArray = bcc
+      ? ( Array.isArray(bcc)
+          ? bcc.map(e => ({ email: e }))
+          : [{ email: bcc }] )
+      : undefined;
+
+    const jmapPayload = {
+      using: [
+        "urn:ietf:params:jmap:core",
+        "urn:ietf:params:jmap:mail",
+        "urn:ietf:params:jmap:submission"
+      ],
+      methodCalls: [
+        [
+          "Email/set",
+          {
+            accountId: accountId,
+            create: {
+              msg1: {
+                mailboxIds: { [targetMailboxId]: true },
+                from: [{ email: from }],
+                to: toArray,
+                ...(ccArray ? { cc: ccArray } : {}),
+                ...(bccArray ? { bcc: bccArray } : {}),
+                subject: subject,
+                bodyValues: {
+                  b1: { value: text || "" },
+                  ...(html ? { b2: { value: html } } : {})
+                },
+                textBody: [{ partId: "b1", type: "text/plain" }],
+                ...(html ? { htmlBody: [{ partId: "b2", type: "text/html" }] } : {})
+              }
+            }
+          },
+          "0"
+        ],
+        [
+          "EmailSubmission/set",
+          {
+            accountId: accountId,
+            create: {
+              sub1: {
+                emailId: "#msg1",
+                identityId: identityId
+              }
+            }
+          },
+          "1"
+        ]
+      ]
+    };
+
+    const response = await fetch(`https://${env.STALWART_ENDPOINT}/jmap/`, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+        "Authorization": authHeader,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(jmapPayload),
     });
 
-    if (!resendResponse.ok) {
-      const error = await resendResponse.text();
-      console.error("Resend API error:", error);
+    if (!response.ok) {
+      const error = await response.text();
+      console.error("Server error:", error);
     }
   },
 
@@ -81,7 +175,7 @@ export default {
         subject: "Unauthorized message from "+message.from+" to "+message.to+": " + subject,
           text: "Using the following cc: "+cc+"\nBody:\n" + cleanBody,
           html: "Using the following cc: "+cc+"\n<br>\nBody:\n<br>\n" + cleanHTML,
-          attachments: attachments.length > 0 ? attachments : undefined,
+        attachments: attachments.length > 0 ? attachments : undefined,
       }, env));
 
       message.setReject("Unauthorized sender.");
@@ -124,9 +218,8 @@ export default {
 
     const targetTo = toMatch[1].trim();
     const targetFrom = fromMatch[1].trim();
-    
 
-    console.log("Sending email from "+targetFrom+" to "+targetTo+". Authorized sender: "+message.from+". Target cc: "+(targetCc ? targetCc.join(', ') : "none")+". Target bcc: "+(targetBcc ? targetBcc.join(', ') : "none")+".")
+    console.log("Sending email from "+targetFrom+" to "+targetTo+". Authorized sender: "+message.from+". Target cc: "+(targetCc ? targetCc.join(', ') : "none")+". Target bcc: "+(targetBcc ? targetBcc.join(', ') : "none")+".");
 
     // send the email
     ctx.waitUntil(this.sendEmail({
