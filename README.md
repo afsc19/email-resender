@@ -1,15 +1,24 @@
 # Email Resender
 
-A Cloudflare Worker script that acts as an email proxy. It allows you to send emails from your custom domain by simply sending a message from your personal email client to a designated forwarding address using [Resend](https://resend.com)'s API.
+A Cloudflare Worker script that acts as an email proxy. It allows you to send emails from your custom domain by simply sending a message from your personal email client to a designated forwarding address using:
+- [Resend](https://resend.com)'s API ([main branch](https://github.com/afsc19/email-resender/tree/main))
+- [Stalwart](https://stalw.art/)'s API ([stalwart branch](https://github.com/afsc19/email-resender/tree/stalwart))
 
 ### Environment variables:
 
 You must provide the following environment variables (either in a `.dev.vars` file for local development or configured in your Cloudflare dashboard):
 
 - `AUTHORIZED_SENDER`: The personal email address that the proxy will accept messages from (e.g., `you@gmail.com`). This prevents unauthorized users from sending emails through your domain.
-- `RESEND_API_KEY`: Your API key from [Resend](https://resend.com), which is used to actually send the outgoing emails.
 - `EMAIL_DOMAIN`: Your custom domain name (e.g., `yourdomain.com`).
 - `MAGIC_PREFIX`: A special string (like `@` or `!`) used at the beginning of lines in your email body to specify routing commands without including them in the final email.
+
+Main (Resend) branch:
+- `RESEND_API_KEY`: Your API key from [Resend](https://resend.com), which is used to actually send the outgoing emails.
+
+Stalwart branch:
+- `STALWART_ENDPOINT`: The endpoint of your Stalwart instance.
+- `STALWART_USER`: The username associated to the account you want to use in your Stalwart instance.
+- `STALWART_PASS`: The password of the account you want to use in your Stalwart instance.
 
 ### Example
 
