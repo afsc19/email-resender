@@ -1,4 +1,4 @@
-import PostalMime, { decodeWords } from 'postal-mime';
+import PostalMime, { decodeWords, addressParser } from 'postal-mime';
 
 export default {
   async sendEmail(body, env) {
@@ -47,10 +47,13 @@ export default {
     const identityId = identities[0].id; // Primary identity ID
 
 
-    // convert recipients to arrays
+    // convert addresses to JMAP's format: plain strings or { name, address } (postal-mime's shape)
     const toAddressList = (value) => value
-      ? (Array.isArray(value) ? value : [value]).map(e => ({ email: e }))
+      ? (Array.isArray(value) ? value : [value]).map(e => typeof e === "string"
+          ? { email: e }
+          : { ...(e.name ? { name: e.name } : {}), email: e.address })
       : undefined;
+    const fromArray = toAddressList(from);
     const toArray = toAddressList(to);
     const ccArray = toAddressList(cc);
     const bccArray = toAddressList(bcc);
@@ -77,7 +80,7 @@ export default {
             create: {
               msg1: {
                 mailboxIds: { [targetMailboxId]: true },
-                from: [{ email: from }],
+                from: fromArray,
                 to: toArray,
                 ...(ccArray ? { cc: ccArray } : {}),
                 ...(bccArray ? { bcc: bccArray } : {}),
@@ -193,22 +196,42 @@ export default {
     // only match commands at the start of a line, same as the ones stripped by textRegex
     const commandRegex = (cmd, value) => new RegExp(`^[^\\S\\r\\n]*${escapedPrefix}${cmd}:[^\\S\\r\\n]*(${value})`, 'im');
     const toMatch = fullText.match(commandRegex('to', '[^\\r\\n]+'));
-    const fromMatch = fullText.match(commandRegex('from', `[^\\s\\r\\n]+@${EMAIL_DOMAIN.replace(/\\./g, '\\\\.')}`));
+    const fromMatch = fullText.match(commandRegex('from', '[^\\r\\n]+'));
     const ccMatch = fullText.match(commandRegex('cc', '[^\\r\\n]+'));
     const bccMatch = fullText.match(commandRegex('bcc', '[^\\r\\n]+'));
     const replyToMatch = fullText.match(commandRegex('reply-to', '[^\\r\\n]+'));
 
     // TO + CC + BCC + reply-to
+    // comma separated, each "email", "Name <email>" or "\"Last, First\" <email>" -> { name, address }
     const parseList = (match) => {
       if (!match)
         return undefined;
-      const list = match[1].split(',').map(email => email.trim()).filter(email => email.includes('@'));
+      const list = addressParser(match[1], { flatten: true }).filter(a => a.address && a.address.includes('@'));
       return list.length > 0 ? list : undefined;
     };
     const targetTo = parseList(toMatch);
     const targetCc = parseList(ccMatch);
     const targetBcc = parseList(bccMatch);
     const targetReplyTo = parseList(replyToMatch);
+
+    // check from
+    const requestedFrom = parseList(fromMatch);
+    const targetFrom = requestedFrom && requestedFrom[0].address.toLowerCase().endsWith('@' + EMAIL_DOMAIN.toLowerCase())
+      ? requestedFrom[0]
+      : undefined;
+
+    // "Name <email>, email" for logs and notifications
+    const formatAddresses = (addresses) => {
+      const list = (Array.isArray(addresses) ? addresses : [addresses])
+        .filter(a => a && a.address)
+        .map(a => a.name ? `${a.name} <${a.address}>` : a.address);
+      return list.length > 0 ? list.join(', ') : "none";
+    };
+    // beautify lol
+    const escapeHtml = (value) => value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
 
     // keep the thread when replying
     const extractMessageIds = (value) => {
@@ -274,20 +297,6 @@ export default {
     if (authFailures.length > 0) {
       console.error("Unauthorized sender: "+message.from);
 
-      // headers of the incoming message (postal-mime address objects)
-      const formatAddresses = (addresses) => {
-        const list = (Array.isArray(addresses) ? addresses : [addresses])
-          .filter(a => a && a.address)
-          .map(a => a.name ? `${a.name} <${a.address}>` : a.address);
-        return list.length > 0 ? list.join(', ') : "none";
-      };
-      // beautify lol
-      const escapeHtml = (value) => value
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-      const rawFromMatch = fullText.match(commandRegex('from', '[^\\r\\n]+'));
-
       const fields = [
         ["Failed checks", authFailures.join(', ')],
         ["Authentication results", authHeader ? authHeader.value : "none"],
@@ -301,11 +310,11 @@ export default {
         ["Header message-id", email.messageId || "none"],
         ["Header in-reply-to", email.inReplyTo || "none"],
         ["Header references", email.references || "none"],
-        ["Requested from", rawFromMatch ? rawFromMatch[1].trim() : "none"],
-        ["Requested to", targetTo ? targetTo.join(', ') : "none"],
-        ["Requested cc", targetCc ? targetCc.join(', ') : "none"],
-        ["Requested bcc", targetBcc ? targetBcc.join(', ') : "none"],
-        ["Requested reply-to", targetReplyTo ? targetReplyTo.join(', ') : "none"],
+        ["Requested from", fromMatch ? fromMatch[1].trim() : "none"],
+        ["Requested to", targetTo ? formatAddresses(targetTo) : "none"],
+        ["Requested cc", targetCc ? formatAddresses(targetCc) : "none"],
+        ["Requested bcc", targetBcc ? formatAddresses(targetBcc) : "none"],
+        ["Requested reply-to", targetReplyTo ? formatAddresses(targetReplyTo) : "none"],
         ["Attachments", attachments.length > 0 ? attachments.map(att => att.filename).join(', ') : "none"],
       ];
       const fieldsText = fields.map(([label, value]) => label+": "+value).join("\n");
@@ -325,22 +334,20 @@ export default {
     }
 
     // no TO or FROM found
-    if (!targetTo || !fromMatch) {
+    if (!targetTo || !targetFrom) {
       console.error(`${MAGIC_PREFIX} commands not found in clean text.`);
       ctx.waitUntil(this.sendEmail({
           from: `security@${EMAIL_DOMAIN}`,
           to: AUTHORIZED_SENDER,
           subject: `Missing ${MAGIC_PREFIX} instructions in body from `+message.from+" to "+message.to+": " + subject,
-          text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
-          html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
+          text: "Requested from: "+ (fromMatch ? fromMatch[1].trim() : "none") +" (must be an address @"+ EMAIL_DOMAIN +")\nUsing the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
+          html: "Requested from: "+ escapeHtml(fromMatch ? fromMatch[1].trim() : "none") +" (must be an address @"+ escapeHtml(EMAIL_DOMAIN) +")\n<br>\nUsing the following cc: "+ escapeHtml(formatAddresses(targetCc)) +"\n<br>\ntarget bcc: "+ escapeHtml(formatAddresses(targetBcc)) +"\n<br>\ntarget reply-to: "+ escapeHtml(formatAddresses(targetReplyTo)) +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
           attachments: attachments.length > 0 ? attachments : undefined,
         }, env));
       return;
     }
 
-    const targetFrom = fromMatch[1].trim();
-
-    console.log("Sending email from "+targetFrom+" to "+targetTo.join(', ')+". Authorized sender: "+message.from+". Target cc: "+(targetCc ? targetCc.join(', ') : "none")+". Target bcc: "+(targetBcc ? targetBcc.join(', ') : "none")+". Target reply-to: "+(targetReplyTo ? targetReplyTo.join(', ') : "none")+". In reply to: "+(targetInReplyTo ? targetInReplyTo.join(', ') : "none")+". References: "+(targetReferences ? targetReferences.join(', ') : "none")+".");
+    console.log("Sending email from "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+". Authorized sender: "+message.from+". Target cc: "+formatAddresses(targetCc)+". Target bcc: "+formatAddresses(targetBcc)+". Target reply-to: "+formatAddresses(targetReplyTo)+". In reply to: "+(targetInReplyTo ? targetInReplyTo.join(', ') : "none")+". References: "+(targetReferences ? targetReferences.join(', ') : "none")+".");
 
     // send the email
     ctx.waitUntil(this.sendEmail({
@@ -362,9 +369,9 @@ export default {
     ctx.waitUntil(this.sendEmail({
         from: `security@${EMAIL_DOMAIN}`,
         to: AUTHORIZED_SENDER,
-        subject: "Email sent From "+targetFrom+" to "+targetTo.join(', ')+": "+ subject,
-        text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
-        html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
+        subject: "Email sent From "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+": "+ subject,
+        text: "Using the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
+        html: "Using the following cc: "+ escapeHtml(formatAddresses(targetCc)) +"\n<br>\ntarget bcc: "+ escapeHtml(formatAddresses(targetBcc)) +"\n<br>\ntarget reply-to: "+ escapeHtml(formatAddresses(targetReplyTo)) +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
         attachments: attachments.length > 0 ? attachments : undefined,
       }, env));
   },
