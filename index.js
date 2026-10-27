@@ -3,13 +3,17 @@ import PostalMime from 'postal-mime';
 export default {
   // send an email using resend.com's API
   async sendEmail(body, env) {
+    const { replyTo, ...rest } = body;
     const resendResponse = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${env.RESEND_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        ...rest,
+        ...(replyTo ? {reply_to: replyTo} : {})
+      }),
     });
 
     if (!resendResponse.ok) {
