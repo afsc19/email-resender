@@ -1,7 +1,7 @@
 {
   "dependencies": {
-    "postal-mime": "^2.7.4",
-    "wrangler": "^4.87.0"
+    "postal-mime": "^2.7.6",
+    "wrangler": "^4.154.0"
   },
   "name": "email-resender",
   "module": "index.js",
@@ -11,6 +11,6 @@
     "@types/bun": "latest"
   },
   "peerDependencies": {
-    "typescript": "^5"
+    "typescript": "^5.9.3"
   }
 }
