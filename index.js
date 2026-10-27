@@ -64,7 +64,8 @@ export default {
 
     let cleanHTML = undefined;
     if (email.html) {
-      const htmlRegex = (cmd) => new RegExp(`(?:<div[^>]*>)?\\s*${escapedPrefix}${cmd}:.*?(?:<br\\s*\\/?>|\\r?\\n|<\\/div>|$)`, 'gi');
+      // a command line ends at <br>, a line break, </div>, or where the next <div>/<p> starts (not consumed)
+      const htmlRegex = (cmd) => new RegExp(`(?:<div[^>]*>)?\\s*${escapedPrefix}${cmd}:.*?(?:<br\\s*\\/?>|\\r?\\n|<\\/div>|(?=<(?:div|p)[\\s>])|$)`, 'gi');
       cleanHTML = email.html
         .replace(htmlRegex('to'), '')
         .replace(htmlRegex('from'), '')
