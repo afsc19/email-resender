@@ -5,11 +5,22 @@ export default {
     const { from, to, cc, bcc, replyTo, inReplyTo, references, extraHeaders, subject, text, html } = body;
     const authHeader = "Basic " + btoa(`${env.STALWART_USER}:${env.STALWART_PASS}`);
 
+    // json debug
+    const readJson = async (res, step) => {
+      const raw = await res.text();
+      try {
+        return JSON.parse(raw);
+      } catch {
+        console.error(`Stalwart ${step} failed: status ${res.status}, final url ${res.url}, endpoint "${env.STALWART_ENDPOINT}", body: ${raw.slice(0, 300)}`);
+        throw new Error(`Stalwart ${step} returned non-JSON (status ${res.status})`);
+      }
+    };
+
     // fetch accountId
     const sessionRes = await fetch(`https://${env.STALWART_ENDPOINT}/.well-known/jmap`, {
       headers: { "Authorization": authHeader }
     });
-    const session = await sessionRes.json();
+    const session = await readJson(sessionRes, "session");
     const accountId = session.primaryAccounts["urn:ietf:params:jmap:submission"];
 
     // fetch mailboxes and identitities
@@ -24,7 +35,7 @@ export default {
         ]
       })
     });
-    const detailsData = await detailsRes.json();
+    const detailsData = await readJson(detailsRes, "mailbox/identity lookup");
 
     // mailbox id
     const mailboxes = detailsData.methodResponses[0][1].list;
@@ -141,7 +152,8 @@ export default {
 
 
     // remove commandlines from body and html
-    const textRegex = (cmd) => new RegExp(`^[ \\t]*${escapedPrefix}${cmd}:.*?(?:\\r?\\n|$)`, 'igm');
+    // [^\S\r\n] = any whitespace except line breaks (gmail can use non-breaking spaces)
+    const textRegex = (cmd) => new RegExp(`^[^\\S\\r\\n]*${escapedPrefix}${cmd}:.*?(?:\\r?\\n|$)`, 'igm');
     const cleanBody = fullText
       .replace(textRegex('to'), "")
       .replace(textRegex('from'), "")
@@ -178,7 +190,7 @@ export default {
 
     // match fields
     // only match commands at the start of a line, same as the ones stripped by textRegex
-    const commandRegex = (cmd, value) => new RegExp(`^[ \\t]*${escapedPrefix}${cmd}:[ \\t]*(${value})`, 'im');
+    const commandRegex = (cmd, value) => new RegExp(`^[^\\S\\r\\n]*${escapedPrefix}${cmd}:[^\\S\\r\\n]*(${value})`, 'im');
     const toMatch = fullText.match(commandRegex('to', '[^\\r\\n]+'));
     const fromMatch = fullText.match(commandRegex('from', `[^\\s\\r\\n]+@${EMAIL_DOMAIN.replace(/\\./g, '\\\\.')}`));
     const ccMatch = fullText.match(commandRegex('cc', '[^\\r\\n]+'));
