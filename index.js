@@ -2,7 +2,7 @@ import PostalMime, { decodeWords, addressParser } from 'postal-mime';
 
 export default {
   async sendEmail(body, env) {
-    const { from, to, cc, bcc, replyTo, inReplyTo, references, extraHeaders, subject, text, html } = body;
+    const { from, to, cc, bcc, replyTo, inReplyTo, references, extraHeaders, subject, text, html, attachments } = body;
     const authHeader = "Basic " + btoa(`${env.STALWART_USER}:${env.STALWART_PASS}`);
 
     // json debug
@@ -22,6 +22,35 @@ export default {
     });
     const session = await readJson(sessionRes, "session");
     const accountId = session.primaryAccounts["urn:ietf:params:jmap:submission"];
+
+    // upload attachments as blobs
+    // JMAP references them by blobId
+    // only the path of the session's uploadUrl is used, the host stays STALWART_ENDPOINT (same as the /jmap/ calls)
+    const uploadPath = attachments && attachments.length > 0
+      ? new URL(session.uploadUrl.replace("{accountId}", encodeURIComponent(accountId)), `https://${env.STALWART_ENDPOINT}`).pathname
+      : undefined;
+    const attachmentParts = await Promise.all((attachments || []).map(async (att) => {
+      const type = att.mimeType || "application/octet-stream";
+      const uploadRes = await fetch(`https://${env.STALWART_ENDPOINT}${uploadPath}`, {
+        method: "POST",
+        headers: { "Authorization": authHeader, "Content-Type": type },
+        body: att.content,
+      });
+      const blob = await readJson(uploadRes, `upload of ${att.filename || "attachment"}`);
+      if (!blob.blobId) {
+        console.error(`Stalwart upload of ${att.filename || "attachment"} failed: status ${uploadRes.status}, body: ${JSON.stringify(blob).slice(0, 300)}`);
+        throw new Error(`Stalwart upload of ${att.filename || "attachment"} returned no blobId`);
+      }
+      // inline images keep their content id so <img src="cid:..."> in the html still works
+      const inline = att.disposition === "inline" && att.contentId;
+      return {
+        blobId: blob.blobId,
+        type: type,
+        ...(att.filename ? { name: att.filename } : {}),
+        disposition: inline ? "inline" : "attachment",
+        ...(inline ? { cid: att.contentId } : {}),
+      };
+    }));
 
     // fetch mailboxes and identitities
     const detailsRes = await fetch(`https://${env.STALWART_ENDPOINT}/jmap/`, {
@@ -97,7 +126,8 @@ export default {
                   ...(html ? { b2: { value: html } } : {})
                 },
                 textBody: [{ partId: "b1", type: "text/plain" }],
-                ...(html ? { htmlBody: [{ partId: "b2", type: "text/html" }] } : {})
+                ...(html ? { htmlBody: [{ partId: "b2", type: "text/html" }] } : {}),
+                ...(attachmentParts.length > 0 ? { attachments: attachmentParts } : {})
               }
             }
           },
@@ -128,10 +158,11 @@ export default {
       body: JSON.stringify(jmapPayload),
     });
 
-    if (!response.ok) {
-      const error = await response.text();
-      console.error("Server error:", error);
-    }
+    // JMAP answers 200 even when the email or submission is refused, the reason is in notCreated
+    const result = await readJson(response, "send");
+    const failures = (result.methodResponses || []).filter(([name, args]) => name === "error" || (args && args.notCreated));
+    if (!response.ok || failures.length > 0)
+      console.error("Server error:", JSON.stringify(failures.length > 0 ? failures : result).slice(0, 1000));
   },
 
   async email(message, env, ctx) {
@@ -185,10 +216,13 @@ export default {
     console.log("dirty html: "+email.html);
     console.log("clean html: "+cleanHTML);
 
-    // map attachments (if any) to resend.com's format
+    // attachments in a provider neutral shape, sendEmail converts them to what its API needs
     const attachments = (email.attachments || []).map(att => ({
       filename: att.filename,
-      content: btoa(String.fromCharCode(...new Uint8Array(att.content))), // Convert to Base64
+      mimeType: att.mimeType,
+      disposition: att.disposition, // "attachment", "inline" or null
+      contentId: att.contentId ? att.contentId.replace(/^<|>$/g, '') : undefined, // without the angle brackets
+      content: att.content, // ArrayBuffer (raw bytes)
     }));
 
 
