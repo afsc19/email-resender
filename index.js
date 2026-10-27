@@ -1,8 +1,8 @@
-import PostalMime from 'postal-mime';
+import PostalMime, { decodeWords } from 'postal-mime';
 
 export default {
   async sendEmail(body, env) {
-    const { from, to, cc, bcc, replyTo, subject, text, html } = body;
+    const { from, to, cc, bcc, replyTo, inReplyTo, references, extraHeaders, subject, text, html } = body;
     const authHeader = "Basic " + btoa(`${env.STALWART_USER}:${env.STALWART_PASS}`);
 
     // fetch accountId
@@ -45,6 +45,13 @@ export default {
     const bccArray = toAddressList(bcc);
     const replyToArray = toAddressList(replyTo);
 
+    // custom headers, e.g. { "Thread-Index": "..." } -> { "header:Thread-Index:asText": "..." }
+    const extraHeaderProps = Object.fromEntries(
+      Object.entries(extraHeaders || {})
+        .filter(([, value]) => value)
+        .map(([name, value]) => [`header:${name}:asText`, value])
+    );
+
     const jmapPayload = {
       using: [
         "urn:ietf:params:jmap:core",
@@ -64,6 +71,12 @@ export default {
                 ...(ccArray ? { cc: ccArray } : {}),
                 ...(bccArray ? { bcc: bccArray } : {}),
                 ...(replyToArray ? { replyTo: replyToArray } : {}),
+
+                // thread headers
+                ...(inReplyTo ? { inReplyTo: inReplyTo } : {}),
+                ...(references ? { references: references } : {}),
+                ...extraHeaderProps,
+
                 subject: subject,
                 bodyValues: {
                   b1: { value: text || "" },
@@ -116,11 +129,11 @@ export default {
         .map(c => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'))
         .join('');
 
-    const subject = message.headers.get("subject") || "";
-
-
     const parser = new PostalMime();
     const email = await parser.parse(message.raw);
+
+    // postal-mime decodes encoded words
+    const subject = email.subject || "";
 
     // email.text contains the "Clean" text without headers or MIME boundaries
     const fullText = email.text || "";
@@ -184,6 +197,25 @@ export default {
     const targetBcc = parseList(bccMatch);
     const targetReplyTo = parseList(replyToMatch);
 
+    // keep the thread when replying
+    const extractMessageIds = (value) => {
+      const ids = (value || "").match(/<[^>]+>/g);
+      return ids ? ids.map(id => id.slice(1, -1)) : undefined;
+    };
+    const targetInReplyTo = extractMessageIds(email.inReplyTo);
+    // references should end with the parent id, fall back to in-reply-to if missing
+    const targetReferences = extractMessageIds(email.references) || targetInReplyTo;
+
+    // postal-mime leaves header values encoded (=?utf-8?B?...?=) and asText expects plain text
+    const getHeader = (key) => {
+      const header = email.headers.find(h => h.key === key);
+      return header ? decodeWords(header.value) : undefined;
+    };
+    const targetThreadHeaders = {
+      "Thread-Index": getHeader("thread-index"), // outlook threads
+      "Thread-Topic": getHeader("thread-topic"), // outlook threads
+    };
+
     // check email origin
     if (message.from !== AUTHORIZED_SENDER) {
       console.error("Unauthorized sender: "+message.from);
@@ -211,6 +243,8 @@ export default {
         ["Header reply-to", formatAddresses(email.replyTo)],
         ["Header date", email.date || "none"],
         ["Header message-id", email.messageId || "none"],
+        ["Header in-reply-to", email.inReplyTo || "none"],
+        ["Header references", email.references || "none"],
         ["Requested from", rawFromMatch ? rawFromMatch[1].trim() : "none"],
         ["Requested to", targetTo ? targetTo.join(', ') : "none"],
         ["Requested cc", targetCc ? targetCc.join(', ') : "none"],
@@ -241,8 +275,8 @@ export default {
           from: `security@${EMAIL_DOMAIN}`,
           to: AUTHORIZED_SENDER,
           subject: `Missing ${MAGIC_PREFIX} instructions in body from `+message.from+" to "+message.to+": " + subject,
-          text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\nBody:\n" + cleanBody,
-          html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
+          text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
+          html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
           attachments: attachments.length > 0 ? attachments : undefined,
         }, env));
       return;
@@ -250,7 +284,7 @@ export default {
 
     const targetFrom = fromMatch[1].trim();
 
-    console.log("Sending email from "+targetFrom+" to "+targetTo.join(', ')+". Authorized sender: "+message.from+". Target cc: "+(targetCc ? targetCc.join(', ') : "none")+". Target bcc: "+(targetBcc ? targetBcc.join(', ') : "none")+". Target reply-to: "+(targetReplyTo ? targetReplyTo.join(', ') : "none")+".");
+    console.log("Sending email from "+targetFrom+" to "+targetTo.join(', ')+". Authorized sender: "+message.from+". Target cc: "+(targetCc ? targetCc.join(', ') : "none")+". Target bcc: "+(targetBcc ? targetBcc.join(', ') : "none")+". Target reply-to: "+(targetReplyTo ? targetReplyTo.join(', ') : "none")+". In reply to: "+(targetInReplyTo ? targetInReplyTo.join(', ') : "none")+". References: "+(targetReferences ? targetReferences.join(', ') : "none")+".");
 
     // send the email
     ctx.waitUntil(this.sendEmail({
@@ -259,6 +293,9 @@ export default {
         cc: targetCc,
         bcc: targetBcc,
         replyTo: targetReplyTo,
+        inReplyTo: targetInReplyTo,
+        references: targetReferences,
+        extraHeaders: targetThreadHeaders,
         subject: subject,
         text: cleanBody,
         html: cleanHTML,
@@ -270,8 +307,8 @@ export default {
         from: `security@${EMAIL_DOMAIN}`,
         to: AUTHORIZED_SENDER,
         subject: "Email sent From "+targetFrom+" to "+targetTo.join(', ')+": "+ subject,
-        text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\nBody:\n" + cleanBody,
-        html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
+        text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
+        html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
         attachments: attachments.length > 0 ? attachments : undefined,
       }, env));
   },
