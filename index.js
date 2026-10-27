@@ -130,7 +130,48 @@ export default {
     };
 
     // check email origin
-    if (message.from !== AUTHORIZED_SENDER) {
+    // envelope and header from can be forged, so also require DKIM + DMARC to pass for the authorized sender's domain.
+    // cloudflare email routing records those results in an (ARC-)Authentication-Results header (authserv-id mx.cloudflare.net).
+    // only the topmost one is trusted: servers prepend their headers, so fake ones added by the sender end up below cloudflare's.
+    const AUTHSERV_ID = "mx.cloudflare.net";
+    const authorizedAddress = AUTHORIZED_SENDER.toLowerCase();
+    const authorizedDomain = authorizedAddress.split('@').pop();
+    const authHeader = email.headers.find(h => h.key === "arc-authentication-results" || h.key === "authentication-results");
+
+    // "i=1; mx.cloudflare.net; dkim=pass header.d=gmail.com ...; dmarc=pass header.from=gmail.com ..."
+    const authParts = authHeader
+      ? authHeader.value.replace(/\([^)]*\)/g, '').split(';').map(part => part.trim()).filter(part => part.length > 0)
+      : [];
+    if (authParts.length > 0 && /^i\s*=/i.test(authParts[0]))
+      authParts.shift(); // ARC instance number
+    const authservId = (authParts.shift() || "").toLowerCase();
+    const authResults = authParts.map(part => {
+      const [result, ...props] = part.split(/\s+/);
+      const [method, value] = result.toLowerCase().split('=');
+      return {
+        method: method,
+        value: value,
+        props: Object.fromEntries(props.map(p => p.split('=')).map(([k, v]) => [k.toLowerCase(), (v || "").toLowerCase()])),
+      };
+    });
+    const dkimPass = authResults.some(r => r.method === "dkim" && r.value === "pass" && r.props["header.d"] === authorizedDomain);
+    const dmarcPass = authResults.some(r => r.method === "dmarc" && r.value === "pass" && r.props["header.from"] === authorizedDomain);
+
+    const authFailures = [];
+    if ((message.from || "").toLowerCase() !== authorizedAddress)
+      authFailures.push("envelope from");
+    if (!email.from || (email.from.address || "").toLowerCase() !== authorizedAddress)
+      authFailures.push("header from");
+    if (authservId !== AUTHSERV_ID)
+      authFailures.push(`authentication results not from ${AUTHSERV_ID} (got "${authservId || "none"}")`);
+    if (!dkimPass)
+      authFailures.push(`dkim pass for ${authorizedDomain}`);
+    if (!dmarcPass)
+      authFailures.push(`dmarc pass for ${authorizedDomain}`);
+
+    console.log("Sender authentication: "+(authFailures.length === 0 ? "ok" : "failed ("+authFailures.join(', ')+")")+". Results: "+(authHeader ? authHeader.value : "none"));
+
+    if (authFailures.length > 0) {
       console.error("Unauthorized sender: "+message.from);
 
       // headers of the incoming message (postal-mime address objects)
@@ -148,6 +189,8 @@ export default {
       const rawFromMatch = fullText.match(commandRegex('from', '[^\\r\\n]+'));
 
       const fields = [
+        ["Failed checks", authFailures.join(', ')],
+        ["Authentication results", authHeader ? authHeader.value : "none"],
         ["Envelope from", message.from],
         ["Envelope to", message.to],
         ["Header from", formatAddresses(email.from)],
