@@ -3,7 +3,7 @@ import PostalMime, { decodeWords, addressParser } from 'postal-mime';
 export default {
   // send an email using resend.com's API
   async sendEmail(body, env) {
-    const { from, to, cc, bcc, replyTo, inReplyTo, references, extraHeaders, ...rest } = body;
+    const { from, to, cc, bcc, replyTo, inReplyTo, references, extraHeaders, attachments, ...rest } = body;
 
     // { name, address } (postal-mime's shape) to "Name" <address> (string)
     const toResendAddress = (e) => typeof e === "string"
@@ -12,6 +12,23 @@ export default {
     const toResendList = (value) => value
       ? (Array.isArray(value) ? value : [value]).map(toResendAddress)
       : undefined;
+
+    // attachments arrive as raw bytes, resend wants base64.
+    // encode in chunks: spreading a whole large file into String.fromCharCode overflows the call stack
+    const toBase64 = (buffer) => {
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000)
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      return btoa(binary);
+    };
+    // inline images keep their content id so <img src="cid:..."> in the html still works
+    const resendAttachments = (attachments || []).map(att => ({
+      filename: att.filename || "attachment",
+      content: toBase64(att.content),
+      ...(att.mimeType ? { content_type: att.mimeType } : {}),
+      ...(att.disposition === "inline" && att.contentId ? { content_id: att.contentId } : {}),
+    }));
 
     // resend has no thread fields, send them as custom headers (message ids need the angle brackets back)
     const headers = Object.fromEntries(
@@ -35,6 +52,7 @@ export default {
         cc: toResendList(cc),
         bcc: toResendList(bcc),
         ...(replyTo ? {reply_to: toResendList(replyTo)} : {}),
+        ...(resendAttachments.length > 0 ? { attachments: resendAttachments } : {}),
         ...(Object.keys(headers).length > 0 ? { headers: headers } : {})
       }),
     });
@@ -95,10 +113,13 @@ export default {
     console.log("dirty html: "+email.html);
     console.log("clean html: "+cleanHTML);
 
-    // map attachments (if any) to resend.com's format
+    // attachments in a provider neutral shape, sendEmail converts them to what its API needs
     const attachments = (email.attachments || []).map(att => ({
       filename: att.filename,
-      content: btoa(String.fromCharCode(...new Uint8Array(att.content))), // Convert to Base64
+      mimeType: att.mimeType,
+      disposition: att.disposition, // "attachment", "inline" or null
+      contentId: att.contentId ? att.contentId.replace(/^<|>$/g, '') : undefined, // without the angle brackets
+      content: att.content, // ArrayBuffer (raw bytes)
     }));
 
 
