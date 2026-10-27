@@ -31,7 +31,8 @@ If your `MAGIC_PREFIX` is set to `!`, your draft might look like this:
 **Body:**
 ```text
 !from: contact@yourdomain.com
-!to: customer@example.com
+!to: customer@example.com, partner@example.com
+!reply-to: support@yourdomain.com, sales@yourdomain.com
 !cc: cc1@example.com, cc2@example.com
 !bcc: bcc1@example.com, bcc2@example.com
 
