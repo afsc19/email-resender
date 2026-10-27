@@ -2,7 +2,7 @@ import PostalMime from 'postal-mime';
 
 export default {
   async sendEmail(body, env) {
-    const { from, to, cc, bcc, subject, text, html } = body;
+    const { from, to, cc, bcc, replyTo, subject, text, html } = body;
     const authHeader = "Basic " + btoa(`${env.STALWART_USER}:${env.STALWART_PASS}`);
 
     // fetch accountId
@@ -37,19 +37,13 @@ export default {
 
 
     // convert recipients to arrays
-    const toArray = Array.isArray(to)
-      ? to.map(e => ({ email: e }))
-      : [{ email: to }];
-    const ccArray = cc
-      ? ( Array.isArray(cc)
-          ? cc.map(e => ({ email: e }))
-          : [{ email: cc }] )
+    const toAddressList = (value) => value
+      ? (Array.isArray(value) ? value : [value]).map(e => ({ email: e }))
       : undefined;
-    const bccArray = bcc
-      ? ( Array.isArray(bcc)
-          ? bcc.map(e => ({ email: e }))
-          : [{ email: bcc }] )
-      : undefined;
+    const toArray = toAddressList(to);
+    const ccArray = toAddressList(cc);
+    const bccArray = toAddressList(bcc);
+    const replyToArray = toAddressList(replyTo);
 
     const jmapPayload = {
       using: [
@@ -69,6 +63,7 @@ export default {
                 to: toArray,
                 ...(ccArray ? { cc: ccArray } : {}),
                 ...(bccArray ? { bcc: bccArray } : {}),
+                ...(replyToArray ? { replyTo: replyToArray } : {}),
                 subject: subject,
                 bodyValues: {
                   b1: { value: text || "" },
@@ -138,7 +133,8 @@ export default {
       .replace(textRegex('to'), "")
       .replace(textRegex('from'), "")
       .replace(textRegex('cc'), "")
-      .replace(textRegex('bcc'), "");
+      .replace(textRegex('bcc'), "")
+      .replace(textRegex('reply-to'), "")
 
     let cleanHTML = undefined;
     if (email.html) {
@@ -148,6 +144,7 @@ export default {
         .replace(htmlRegex('from'), '')
         .replace(htmlRegex('cc'), '')
         .replace(htmlRegex('bcc'), '')
+        .replace(htmlRegex('reply-to'), '')
         
         // Clean up empty lines or divs that might be left over
         .replace(/(<div[^>]*>)(<br\s*\/?>)+/gi, '$1')
@@ -166,15 +163,70 @@ export default {
     }));
 
 
+    // match fields
+    // only match commands at the start of a line, same as the ones stripped by textRegex
+    const commandRegex = (cmd, value) => new RegExp(`^[ \\t]*${escapedPrefix}${cmd}:[ \\t]*(${value})`, 'im');
+    const toMatch = fullText.match(commandRegex('to', '[^\\r\\n]+'));
+    const fromMatch = fullText.match(commandRegex('from', `[^\\s\\r\\n]+@${EMAIL_DOMAIN.replace(/\\./g, '\\\\.')}`));
+    const ccMatch = fullText.match(commandRegex('cc', '[^\\r\\n]+'));
+    const bccMatch = fullText.match(commandRegex('bcc', '[^\\r\\n]+'));
+    const replyToMatch = fullText.match(commandRegex('reply-to', '[^\\r\\n]+'));
+
+    // TO + CC + BCC + reply-to
+    const parseList = (match) => {
+      if (!match)
+        return undefined;
+      const list = match[1].split(',').map(email => email.trim()).filter(email => email.includes('@'));
+      return list.length > 0 ? list : undefined;
+    };
+    const targetTo = parseList(toMatch);
+    const targetCc = parseList(ccMatch);
+    const targetBcc = parseList(bccMatch);
+    const targetReplyTo = parseList(replyToMatch);
+
     // check email origin
     if (message.from !== AUTHORIZED_SENDER) {
       console.error("Unauthorized sender: "+message.from);
+
+      // headers of the incoming message (postal-mime address objects)
+      const formatAddresses = (addresses) => {
+        const list = (Array.isArray(addresses) ? addresses : [addresses])
+          .filter(a => a && a.address)
+          .map(a => a.name ? `${a.name} <${a.address}>` : a.address);
+        return list.length > 0 ? list.join(', ') : "none";
+      };
+      // beautify lol
+      const escapeHtml = (value) => value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      const rawFromMatch = fullText.match(commandRegex('from', '[^\\r\\n]+'));
+
+      const fields = [
+        ["Envelope from", message.from],
+        ["Envelope to", message.to],
+        ["Header from", formatAddresses(email.from)],
+        ["Header to", formatAddresses(email.to)],
+        ["Header cc", formatAddresses(email.cc)],
+        ["Header reply-to", formatAddresses(email.replyTo)],
+        ["Header date", email.date || "none"],
+        ["Header message-id", email.messageId || "none"],
+        ["Requested from", rawFromMatch ? rawFromMatch[1].trim() : "none"],
+        ["Requested to", targetTo ? targetTo.join(', ') : "none"],
+        ["Requested cc", targetCc ? targetCc.join(', ') : "none"],
+        ["Requested bcc", targetBcc ? targetBcc.join(', ') : "none"],
+        ["Requested reply-to", targetReplyTo ? targetReplyTo.join(', ') : "none"],
+        ["Attachments", attachments.length > 0 ? attachments.map(att => att.filename).join(', ') : "none"],
+      ];
+      const fieldsText = fields.map(([label, value]) => label+": "+value).join("\n");
+      const fieldsHTML = fields.map(([label, value]) => label+": "+escapeHtml(String(value))).join("\n<br>\n");
+
       ctx.waitUntil(this.sendEmail({
         from: `security@${EMAIL_DOMAIN}`,
         to: AUTHORIZED_SENDER,
         subject: "Unauthorized message from "+message.from+" to "+message.to+": " + subject,
-          text: "Using the following cc: "+cc+"\nBody:\n" + cleanBody,
-          html: "Using the following cc: "+cc+"\n<br>\nBody:\n<br>\n" + cleanHTML,
+          text: fieldsText + "\nBody:\n" + cleanBody,
+          html: fieldsHTML + "\n<br>\nBody:\n<br>\n" + cleanHTML,
         attachments: attachments.length > 0 ? attachments : undefined,
       }, env));
 
@@ -182,28 +234,8 @@ export default {
       return;
     }
 
-    // match fields
-    const toMatch = fullText.match(new RegExp(`${escapedPrefix}to:\\s*([^\\s\\r\\n]+@[^\\s\\r\\n]+)`, 'i'));
-    const fromMatch = fullText.match(new RegExp(`${escapedPrefix}from:\\s*([^\\s\\r\\n]+@${EMAIL_DOMAIN.replace(/\\./g, '\\\\.')})`, 'i'));
-    const ccMatch = fullText.match(new RegExp(`${escapedPrefix}cc:\\s*([^\\r\\n]+)`, 'i'));
-    const bccMatch = fullText.match(new RegExp(`${escapedPrefix}bcc:\\s*([^\\r\\n]+)`, 'i'));
-
-    // CC + BCC
-    let targetCc = undefined;
-    let targetBcc = undefined;
-    if (ccMatch) {
-      targetCc = ccMatch[1].split(',').map(email => email.trim()).filter(email => email.length > 0);
-      if (targetCc.length === 0)
-        targetCc = undefined;
-    }
-    if (bccMatch) {
-      targetBcc = bccMatch[1].split(',').map(email => email.trim()).filter(email => email.length > 0);
-      if (targetBcc.length === 0)
-        targetBcc = undefined;
-    }
-
     // no TO or FROM found
-    if (!toMatch || !fromMatch) {
+    if (!targetTo || !fromMatch) {
       console.error(`${MAGIC_PREFIX} commands not found in clean text.`);
       ctx.waitUntil(this.sendEmail({
           from: `security@${EMAIL_DOMAIN}`,
@@ -216,10 +248,9 @@ export default {
       return;
     }
 
-    const targetTo = toMatch[1].trim();
     const targetFrom = fromMatch[1].trim();
 
-    console.log("Sending email from "+targetFrom+" to "+targetTo+". Authorized sender: "+message.from+". Target cc: "+(targetCc ? targetCc.join(', ') : "none")+". Target bcc: "+(targetBcc ? targetBcc.join(', ') : "none")+".");
+    console.log("Sending email from "+targetFrom+" to "+targetTo.join(', ')+". Authorized sender: "+message.from+". Target cc: "+(targetCc ? targetCc.join(', ') : "none")+". Target bcc: "+(targetBcc ? targetBcc.join(', ') : "none")+". Target reply-to: "+(targetReplyTo ? targetReplyTo.join(', ') : "none")+".");
 
     // send the email
     ctx.waitUntil(this.sendEmail({
@@ -227,6 +258,7 @@ export default {
         to: targetTo,
         cc: targetCc,
         bcc: targetBcc,
+        replyTo: targetReplyTo,
         subject: subject,
         text: cleanBody,
         html: cleanHTML,
@@ -237,9 +269,9 @@ export default {
     ctx.waitUntil(this.sendEmail({
         from: `security@${EMAIL_DOMAIN}`,
         to: AUTHORIZED_SENDER,
-        subject: "Email sent From "+targetFrom+" to "+targetTo+": "+ subject,
-        text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\nBody:\n" + cleanBody,
-        html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
+        subject: "Email sent From "+targetFrom+" to "+targetTo.join(', ')+": "+ subject,
+        text: "Using the following target cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\nBody:\n" + cleanBody,
+        html: "Using the following cc: "+ (targetCc ? targetCc.join(', ') : "none") +"\n<br>\ntarget bcc: "+ (targetBcc ? targetBcc.join(', ') : "none") +"\n<br>\ntarget reply-to: "+ (targetReplyTo ? targetReplyTo.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
         attachments: attachments.length > 0 ? attachments : undefined,
       }, env));
   },
