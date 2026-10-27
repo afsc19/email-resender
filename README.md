@@ -30,15 +30,22 @@ If your `MAGIC_PREFIX` is set to `!`, your draft might look like this:
 **Subject:** `Hello from my custom domain!`<br>
 **Body:**
 ```text
-!from: contact@yourdomain.com
-!to: customer@example.com, partner@example.com
-!reply-to: support@yourdomain.com, sales@yourdomain.com
-!cc: cc1@example.com, cc2@example.com
+!from: Acme Support <contact@yourdomain.com>
+!to: Jane Customer <customer@example.com>, partner@example.com
+!reply-to: Support Team <support@yourdomain.com>, sales@yourdomain.com
+!cc: "Doe, John" <cc1@example.com>, cc2@example.com
 !bcc: bcc1@example.com, bcc2@example.com
 
 Hi there!
 This is the actual body of the email. Notice how the commands above will be stripped out so the recipient won't see them.
 ```
+
+Every address can be written as:
+- `email@example.com`
+- `Name <email@example.com>`, to show a display name
+- `"Last, First" <email@example.com>`, with quotes when the name contains a comma
+
+`to`, `cc`, `bcc` and `reply-to` take a comma-separated list. `from` takes a single address, which must be on your `EMAIL_DOMAIN`.
 
 
 
