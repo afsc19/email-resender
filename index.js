@@ -67,6 +67,15 @@ export default {
     const EMAIL_DOMAIN = env.EMAIL_DOMAIN;
     const AUTHORIZED_SENDER = env.AUTHORIZED_SENDER;
     const MAGIC_PREFIX = env.MAGIC_PREFIX;
+    // sender of the worker's own emails - unauthorized/missing-instructions notices & optional confirmation
+    // NOTIFICATION_SENDER is the part before the @ (default "security"), or a full address like "emailsecurity@yourdomain.com"
+    // a full address must be on our domain (same check as !from:), otherwise fall back to the default so notices still go out
+    const notificationSender = (env.NOTIFICATION_SENDER || "security").trim();
+    let NOTIFICATION_FROM = notificationSender.includes('@') ? notificationSender : `${notificationSender}@${EMAIL_DOMAIN}`;
+    if (!NOTIFICATION_FROM.toLowerCase().endsWith('@' + EMAIL_DOMAIN.toLowerCase())) {
+      console.error(`NOTIFICATION_SENDER "${notificationSender}" is not an address @${EMAIL_DOMAIN}, using security@${EMAIL_DOMAIN} instead.`);
+      NOTIFICATION_FROM = `security@${EMAIL_DOMAIN}`;
+    }
     // Hex-encode to guarantee no regex collision
     const escapedPrefix = Array.from(MAGIC_PREFIX)
         .map(c => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'))
@@ -252,7 +261,7 @@ export default {
       const fieldsHTML = fields.map(([label, value]) => label+": "+escapeHtml(String(value))).join("\n<br>\n");
 
       ctx.waitUntil(this.sendEmail({
-        from: `security@${EMAIL_DOMAIN}`,
+        from: NOTIFICATION_FROM,
         to: AUTHORIZED_SENDER,
         subject: "Unauthorized message from "+message.from+" to "+message.to+": " + subject,
           text: fieldsText + "\nBody:\n" + cleanBody,
@@ -268,7 +277,7 @@ export default {
     if (!targetTo || !targetFrom) {
       console.error(`${MAGIC_PREFIX} commands not found in clean text.`);
       ctx.waitUntil(this.sendEmail({
-          from: `security@${EMAIL_DOMAIN}`,
+          from: NOTIFICATION_FROM,
           to: AUTHORIZED_SENDER,
           subject: `Missing ${MAGIC_PREFIX} instructions in body from `+message.from+" to "+message.to+": " + subject,
           text: "Requested from: "+ (fromMatch ? fromMatch[1].trim() : "none") +" (must be an address @"+ EMAIL_DOMAIN +")\nUsing the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
@@ -278,14 +287,22 @@ export default {
       return;
     }
 
-    console.log("Sending email from "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+". Authorized sender: "+message.from+". Target cc: "+formatAddresses(targetCc)+". Target bcc: "+formatAddresses(targetBcc)+". Target reply-to: "+formatAddresses(targetReplyTo)+". In reply to: "+(targetInReplyTo ? targetInReplyTo.join(', ') : "none")+". References: "+(targetReferences ? targetReferences.join(', ') : "none")+".");
+    // bcc myself a copy of the exact email that was sent (replies work yay)
+    // skipped if you're already one of the recipients
+    const authorizedIsRecipient = [...targetTo, ...(targetCc || []), ...(targetBcc || [])]
+      .some(a => a.address.toLowerCase() === authorizedAddress);
+    const outgoingBcc = authorizedIsRecipient
+      ? targetBcc
+      : [...(targetBcc || []), { name: "", address: AUTHORIZED_SENDER }];
+
+    console.log("Sending email from "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+". Authorized sender: "+message.from+". Target cc: "+formatAddresses(targetCc)+". Target bcc: "+formatAddresses(targetBcc)+". Target reply-to: "+formatAddresses(targetReplyTo)+". In reply to: "+(targetInReplyTo ? targetInReplyTo.join(', ') : "none")+". References: "+(targetReferences ? targetReferences.join(', ') : "none")+". Copy for "+AUTHORIZED_SENDER+": "+(authorizedIsRecipient ? "already a recipient" : "bcc")+".");
 
     // send the email
     ctx.waitUntil(this.sendEmail({
         from: targetFrom,
         to: targetTo,
         cc: targetCc,
-        bcc: targetBcc,
+        bcc: outgoingBcc,
         replyTo: targetReplyTo,
         inReplyTo: targetInReplyTo,
         references: targetReferences,
@@ -296,14 +313,17 @@ export default {
         attachments: attachments.length > 0 ? attachments : undefined,
       }, env));
 
-    // send a confirmation email to the authorized_sender
-    ctx.waitUntil(this.sendEmail({
-        from: `security@${EMAIL_DOMAIN}`,
-        to: AUTHORIZED_SENDER,
-        subject: "Email sent From "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+": "+ subject,
-        text: "Using the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
-        html: "Using the following cc: "+ escapeHtml(formatAddresses(targetCc)) +"\n<br>\ntarget bcc: "+ escapeHtml(formatAddresses(targetBcc)) +"\n<br>\ntarget reply-to: "+ escapeHtml(formatAddresses(targetReplyTo)) +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
-        attachments: attachments.length > 0 ? attachments : undefined,
-      }, env));
+    // optional summary email to the authorized sender according to SEND_CONFIRMATION
+    // attachments are only listed by name: the bcc copy already has the files, so no duplicates :D
+    if (["true", "1", "yes"].includes(String(env.SEND_CONFIRMATION || "").toLowerCase())) {
+      const attachmentNames = attachments.length > 0 ? attachments.map(att => att.filename || "unnamed").join(', ') : "none";
+      ctx.waitUntil(this.sendEmail({
+          from: NOTIFICATION_FROM,
+          to: AUTHORIZED_SENDER,
+          subject: "Email sent From "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+": "+ subject,
+          text: "Using the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nattachments: "+ attachmentNames +"\nBody:\n" + cleanBody,
+          html: "Using the following cc: "+ escapeHtml(formatAddresses(targetCc)) +"\n<br>\ntarget bcc: "+ escapeHtml(formatAddresses(targetBcc)) +"\n<br>\ntarget reply-to: "+ escapeHtml(formatAddresses(targetReplyTo)) +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nattachments: "+ escapeHtml(attachmentNames) +"\n<br>\nBody:\n<br>\n" + cleanHTML,
+        }, env));
+    }
   },
 };
