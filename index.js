@@ -87,9 +87,18 @@ export default {
     // 2 - wildcard for the domain (which is the one I use)
     // 3 - primary one [0]
     const fromEmail = fromArray[0].email.toLowerCase();
-    const identity = identities.find(i => (i.email || "").toLowerCase() === fromEmail)
-      || identities.find(i => (i.email || "").toLowerCase() === "*@" + fromEmail.split('@').pop())
-      || identities[0];
+    const exactIdentity = identities.find(i => (i.email || "").toLowerCase() === fromEmail);
+    const wildcardIdentity = identities.find(i => (i.email || "").toLowerCase() === "*@" + fromEmail.split('@').pop());
+    const identity = exactIdentity || wildcardIdentity || identities[0];
+    if (!identity) {
+      console.error(`Stalwart account "${env.STALWART_USER}" has no identities, can't send as ${fromEmail}. Add one in Stalwart (e.g. *@${fromEmail.split('@').pop()}).`);
+      throw new Error("Stalwart account has no identities");
+    }
+    const identityMatch = exactIdentity ? "exact" : wildcardIdentity ? "wildcard" : "none";
+    if (identityMatch === "none")
+      console.error(`No Stalwart identity for ${fromEmail}: falling back to the primary identity ${identity.email} (id ${identity.id}). Stalwart may refuse the email (forbiddenFrom) or rewrite the From. Available identities: ${identities.map(i => i.email).join(', ')}. Add an identity for ${fromEmail} or *@${fromEmail.split('@').pop()}.`);
+    else
+      console.log(`Stalwart identity for ${fromEmail}: ${identity.email} (id ${identity.id}, ${identityMatch} match).`);
     const identityId = identity.id;
     const toArray = toAddressList(to);
     const ccArray = toAddressList(cc);
@@ -181,7 +190,7 @@ export default {
     const result = await readJson(response, "send");
     const failures = (result.methodResponses || []).filter(([name, args]) => name === "error" || (args && (args.notCreated || args.notUpdated)));
     if (!response.ok || failures.length > 0)
-      console.error("Server error:", JSON.stringify(failures.length > 0 ? failures : result).slice(0, 1000));
+      console.error(`Server error (from ${fromEmail}, identity ${identity.email}, ${identityMatch} match):`, JSON.stringify(failures.length > 0 ? failures : result).slice(0, 1000));
   },
 
   async email(message, env, ctx) {
