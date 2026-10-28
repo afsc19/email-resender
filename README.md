@@ -12,6 +12,12 @@ You must provide the following environment variables (either in a `.dev.vars` fi
 - `EMAIL_DOMAIN`: Your custom domain name (e.g., `yourdomain.com`).
 - `MAGIC_PREFIX`: A special string (like `@` or `!`) used at the beginning of lines in your email body to specify routing commands without including them in the final email.
 
+Optional (used with their default value when not set):
+- `NOTIFICATION_SENDER`: The address the worker's own emails come from: the unauthorized-sender and missing-instructions notices, and the optional confirmation. Either just the part before the `@` (e.g. `alerts` → `alerts@yourdomain.com`) or a full address on your domain. A full address on another domain is ignored: the worker logs an error and uses the default instead, so notices still go out.
+  **Default:** `security` (i.e. `security@yourdomain.com`).
+- `SEND_CONFIRMATION`: Set to `true` (or `1`/`yes`) to also receive a summary email (from the `NOTIFICATION_SENDER` address) after each send, listing the recipients, cc, bcc, reply-to, thread headers and attachment names. You always get a bcc copy of the exact email that was sent, so this is only useful if you want the extra details. Attachments are listed by name, not attached again.
+  **Default:** `false` (no summary email).
+
 Main (Resend) branch:
 - `RESEND_API_KEY`: Your API key from [Resend](https://resend.com), which is used to actually send the outgoing emails.
 

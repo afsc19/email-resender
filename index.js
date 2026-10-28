@@ -66,10 +66,10 @@ export default {
     });
     const detailsData = await readJson(detailsRes, "mailbox/identity lookup");
 
-    // mailbox id
+    // mailbox ids: the email is created in drafts and moved to sent once it was actually sent
     const mailboxes = detailsData.methodResponses[0][1].list;
-    const targetFolder = mailboxes.find(m => m.role === "drafts" || m.role === "outbox") || mailboxes[0]; // basically use drafts
-    const targetMailboxId = targetFolder.id;
+    const draftsMailbox = mailboxes.find(m => m.role === "drafts") || mailboxes[0];
+    const sentMailbox = mailboxes.find(m => m.role === "sent");
 
     // identity id
     const identities = detailsData.methodResponses[1][1].list;
@@ -87,6 +87,13 @@ export default {
     const ccArray = toAddressList(cc);
     const bccArray = toAddressList(bcc);
     const replyToArray = toAddressList(replyTo);
+
+    // SMTP envelope: who it is actually delivered to.
+    // bcc only goes here, never into the email's headers, so recipients can't see it whatever the server does with Bcc
+    const rcptTo = [...(toArray || []), ...(ccArray || []), ...(bccArray || [])]
+      .map(a => a.email)
+      .filter((address, i, all) => all.findIndex(other => other.toLowerCase() === address.toLowerCase()) === i)
+      .map(address => ({ email: address }));
 
     // custom headers, e.g. { "Thread-Index": "..." } -> { "header:Thread-Index:asText": "..." }
     const extraHeaderProps = Object.fromEntries(
@@ -108,11 +115,11 @@ export default {
             accountId: accountId,
             create: {
               msg1: {
-                mailboxIds: { [targetMailboxId]: true },
+                mailboxIds: { [draftsMailbox.id]: true },
+                keywords: { "$draft": true, "$seen": true },
                 from: fromArray,
                 to: toArray,
                 ...(ccArray ? { cc: ccArray } : {}),
-                ...(bccArray ? { bcc: bccArray } : {}),
                 ...(replyToArray ? { replyTo: replyToArray } : {}),
 
                 // thread headers
@@ -140,9 +147,23 @@ export default {
             create: {
               sub1: {
                 emailId: "#msg1",
-                identityId: identityId
+                identityId: identityId,
+                envelope: {
+                  mailFrom: { email: fromArray[0].email },
+                  rcptTo: rcptTo,
+                }
               }
-            }
+            },
+            // once sent: move it from drafts to sent and drop the draft flag
+            ...(sentMailbox && sentMailbox.id !== draftsMailbox.id ? {
+              onSuccessUpdateEmail: {
+                "#sub1": {
+                  [`mailboxIds/${draftsMailbox.id}`]: null,
+                  [`mailboxIds/${sentMailbox.id}`]: true,
+                  "keywords/$draft": null,
+                }
+              }
+            } : {})
           },
           "1"
         ]
@@ -158,9 +179,9 @@ export default {
       body: JSON.stringify(jmapPayload),
     });
 
-    // JMAP answers 200 even when the email or submission is refused, the reason is in notCreated
+    // JMAP answers 200 even when the email or submission is refused, the reason is in notCreated/notUpdated
     const result = await readJson(response, "send");
-    const failures = (result.methodResponses || []).filter(([name, args]) => name === "error" || (args && args.notCreated));
+    const failures = (result.methodResponses || []).filter(([name, args]) => name === "error" || (args && (args.notCreated || args.notUpdated)));
     if (!response.ok || failures.length > 0)
       console.error("Server error:", JSON.stringify(failures.length > 0 ? failures : result).slice(0, 1000));
   },
@@ -169,6 +190,15 @@ export default {
     const EMAIL_DOMAIN = env.EMAIL_DOMAIN;
     const AUTHORIZED_SENDER = env.AUTHORIZED_SENDER;
     const MAGIC_PREFIX = env.MAGIC_PREFIX;
+    // sender of the worker's own emails - unauthorized/missing-instructions notices & optional confirmation
+    // NOTIFICATION_SENDER is the part before the @ (default "security"), or a full address like "emailsecurity@yourdomain.com"
+    // a full address must be on our domain (same check as !from:), otherwise fall back to the default so notices still go out
+    const notificationSender = (env.NOTIFICATION_SENDER || "security").trim();
+    let NOTIFICATION_FROM = notificationSender.includes('@') ? notificationSender : `${notificationSender}@${EMAIL_DOMAIN}`;
+    if (!NOTIFICATION_FROM.toLowerCase().endsWith('@' + EMAIL_DOMAIN.toLowerCase())) {
+      console.error(`NOTIFICATION_SENDER "${notificationSender}" is not an address @${EMAIL_DOMAIN}, using security@${EMAIL_DOMAIN} instead.`);
+      NOTIFICATION_FROM = `security@${EMAIL_DOMAIN}`;
+    }
     // Hex-encode to guarantee no regex collision
     const escapedPrefix = Array.from(MAGIC_PREFIX)
         .map(c => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'))
@@ -355,7 +385,7 @@ export default {
       const fieldsHTML = fields.map(([label, value]) => label+": "+escapeHtml(String(value))).join("\n<br>\n");
 
       ctx.waitUntil(this.sendEmail({
-        from: `security@${EMAIL_DOMAIN}`,
+        from: NOTIFICATION_FROM,
         to: AUTHORIZED_SENDER,
         subject: "Unauthorized message from "+message.from+" to "+message.to+": " + subject,
           text: fieldsText + "\nBody:\n" + cleanBody,
@@ -371,7 +401,7 @@ export default {
     if (!targetTo || !targetFrom) {
       console.error(`${MAGIC_PREFIX} commands not found in clean text.`);
       ctx.waitUntil(this.sendEmail({
-          from: `security@${EMAIL_DOMAIN}`,
+          from: NOTIFICATION_FROM,
           to: AUTHORIZED_SENDER,
           subject: `Missing ${MAGIC_PREFIX} instructions in body from `+message.from+" to "+message.to+": " + subject,
           text: "Requested from: "+ (fromMatch ? fromMatch[1].trim() : "none") +" (must be an address @"+ EMAIL_DOMAIN +")\nUsing the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
@@ -381,14 +411,22 @@ export default {
       return;
     }
 
-    console.log("Sending email from "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+". Authorized sender: "+message.from+". Target cc: "+formatAddresses(targetCc)+". Target bcc: "+formatAddresses(targetBcc)+". Target reply-to: "+formatAddresses(targetReplyTo)+". In reply to: "+(targetInReplyTo ? targetInReplyTo.join(', ') : "none")+". References: "+(targetReferences ? targetReferences.join(', ') : "none")+".");
+    // bcc myself a copy of the exact email that was sent (replies work yay)
+    // skipped if you're already one of the recipients
+    const authorizedIsRecipient = [...targetTo, ...(targetCc || []), ...(targetBcc || [])]
+      .some(a => a.address.toLowerCase() === authorizedAddress);
+    const outgoingBcc = authorizedIsRecipient
+      ? targetBcc
+      : [...(targetBcc || []), { name: "", address: AUTHORIZED_SENDER }];
+
+    console.log("Sending email from "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+". Authorized sender: "+message.from+". Target cc: "+formatAddresses(targetCc)+". Target bcc: "+formatAddresses(targetBcc)+". Target reply-to: "+formatAddresses(targetReplyTo)+". In reply to: "+(targetInReplyTo ? targetInReplyTo.join(', ') : "none")+". References: "+(targetReferences ? targetReferences.join(', ') : "none")+". Copy for "+AUTHORIZED_SENDER+": "+(authorizedIsRecipient ? "already a recipient" : "bcc")+".");
 
     // send the email
     ctx.waitUntil(this.sendEmail({
         from: targetFrom,
         to: targetTo,
         cc: targetCc,
-        bcc: targetBcc,
+        bcc: outgoingBcc,
         replyTo: targetReplyTo,
         inReplyTo: targetInReplyTo,
         references: targetReferences,
@@ -399,14 +437,17 @@ export default {
         attachments: attachments.length > 0 ? attachments : undefined,
       }, env));
 
-    // send a confirmation email to the authorized_sender
-    ctx.waitUntil(this.sendEmail({
-        from: `security@${EMAIL_DOMAIN}`,
-        to: AUTHORIZED_SENDER,
-        subject: "Email sent From "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+": "+ subject,
-        text: "Using the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
-        html: "Using the following cc: "+ escapeHtml(formatAddresses(targetCc)) +"\n<br>\ntarget bcc: "+ escapeHtml(formatAddresses(targetBcc)) +"\n<br>\ntarget reply-to: "+ escapeHtml(formatAddresses(targetReplyTo)) +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
-        attachments: attachments.length > 0 ? attachments : undefined,
-      }, env));
+    // optional summary email to the authorized sender according to SEND_CONFIRMATION
+    // attachments are only listed by name: the bcc copy already has the files, so no duplicates :D
+    if (["true", "1", "yes"].includes(String(env.SEND_CONFIRMATION || "").toLowerCase())) {
+      const attachmentNames = attachments.length > 0 ? attachments.map(att => att.filename || "unnamed").join(', ') : "none";
+      ctx.waitUntil(this.sendEmail({
+          from: NOTIFICATION_FROM,
+          to: AUTHORIZED_SENDER,
+          subject: "Email sent From "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+": "+ subject,
+          text: "Using the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nattachments: "+ attachmentNames +"\nBody:\n" + cleanBody,
+          html: "Using the following cc: "+ escapeHtml(formatAddresses(targetCc)) +"\n<br>\ntarget bcc: "+ escapeHtml(formatAddresses(targetBcc)) +"\n<br>\ntarget reply-to: "+ escapeHtml(formatAddresses(targetReplyTo)) +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nattachments: "+ escapeHtml(attachmentNames) +"\n<br>\nBody:\n<br>\n" + cleanHTML,
+        }, env));
+    }
   },
 };
