@@ -71,9 +71,7 @@ export default {
     const draftsMailbox = mailboxes.find(m => m.role === "drafts") || mailboxes[0];
     const sentMailbox = mailboxes.find(m => m.role === "sent");
 
-    // identity id
     const identities = detailsData.methodResponses[1][1].list;
-    const identityId = identities[0].id; // Primary identity ID
 
 
     // convert addresses to JMAP's format: plain strings or { name, address } (postal-mime's shape)
@@ -83,6 +81,17 @@ export default {
           : { ...(e.name ? { name: e.name } : {}), email: e.address })
       : undefined;
     const fromArray = toAddressList(from);
+
+    // envelope must match the identity to send with:
+    // 1 - from address
+    // 2 - wildcard for the domain (which is the one I use)
+    // 3 - primary one [0]
+    const fromEmail = fromArray[0].email.toLowerCase();
+    const identity = identities.find(i => (i.email || "").toLowerCase() === fromEmail)
+      || identities.find(i => (i.email || "").toLowerCase() === "*@" + fromEmail.split('@').pop())
+      || identities[0];
+    const identityId = identity.id;
+    const mailFrom = identity.email && !identity.email.startsWith("*@") ? identity.email : fromArray[0].email;
     const toArray = toAddressList(to);
     const ccArray = toAddressList(cc);
     const bccArray = toAddressList(bcc);
@@ -149,7 +158,7 @@ export default {
                 emailId: "#msg1",
                 identityId: identityId,
                 envelope: {
-                  mailFrom: { email: fromArray[0].email },
+                  mailFrom: { email: mailFrom },
                   rcptTo: rcptTo,
                 }
               }
