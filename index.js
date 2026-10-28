@@ -206,6 +206,19 @@ export default {
       console.error(`NOTIFICATION_SENDER "${notificationSender}" is not an address @${EMAIL_DOMAIN}, using security@${EMAIL_DOMAIN} instead.`);
       NOTIFICATION_FROM = `security@${EMAIL_DOMAIN}`;
     }
+
+    // optional BIMI selector (BIMI_SELECTOR)
+    // every email gets "BIMI-Selector: v=BIMI1; s=<selector>;"
+    // so BIMI receivers read <selector>._bimi.<domain> instead of default._bimi.<domain> to pick the logo
+    // receivers ignore it unless the domain's DKIM signature covers it (add BIMI-Selector to stalwart's signed headers)
+    const bimiSelector = (env.BIMI_SELECTOR || "").trim();
+    const bimiHeaders = {};
+    if (bimiSelector) {
+      if (/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$/.test(bimiSelector))
+        bimiHeaders["BIMI-Selector"] = `v=BIMI1; s=${bimiSelector};`;
+      else
+        console.error(`BIMI_SELECTOR "${bimiSelector}" is not a valid selector (letters, digits, dashes, dot separated), no BIMI-Selector header added.`);
+    }
     // Hex-encode to guarantee no regex collision
     const escapedPrefix = Array.from(MAGIC_PREFIX)
         .map(c => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'))
@@ -394,6 +407,7 @@ export default {
       ctx.waitUntil(this.sendEmail({
         from: NOTIFICATION_FROM,
         to: AUTHORIZED_SENDER,
+        extraHeaders: bimiHeaders,
         subject: "Unauthorized message from "+message.from+" to "+message.to+": " + subject,
           text: fieldsText + "\nBody:\n" + cleanBody,
           html: fieldsHTML + "\n<br>\nBody:\n<br>\n" + cleanHTML,
@@ -410,6 +424,7 @@ export default {
       ctx.waitUntil(this.sendEmail({
           from: NOTIFICATION_FROM,
           to: AUTHORIZED_SENDER,
+          extraHeaders: bimiHeaders,
           subject: `Missing ${MAGIC_PREFIX} instructions in body from `+message.from+" to "+message.to+": " + subject,
           text: "Requested from: "+ (fromMatch ? fromMatch[1].trim() : "none") +" (must be an address @"+ EMAIL_DOMAIN +")\nUsing the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nBody:\n" + cleanBody,
           html: "Requested from: "+ escapeHtml(fromMatch ? fromMatch[1].trim() : "none") +" (must be an address @"+ escapeHtml(EMAIL_DOMAIN) +")\n<br>\nUsing the following cc: "+ escapeHtml(formatAddresses(targetCc)) +"\n<br>\ntarget bcc: "+ escapeHtml(formatAddresses(targetBcc)) +"\n<br>\ntarget reply-to: "+ escapeHtml(formatAddresses(targetReplyTo)) +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nBody:\n<br>\n" + cleanHTML,
@@ -437,7 +452,7 @@ export default {
         replyTo: targetReplyTo,
         inReplyTo: targetInReplyTo,
         references: targetReferences,
-        extraHeaders: targetThreadHeaders,
+        extraHeaders: { ...targetThreadHeaders, ...bimiHeaders },
         subject: subject,
         text: cleanBody,
         html: cleanHTML,
@@ -451,6 +466,7 @@ export default {
       ctx.waitUntil(this.sendEmail({
           from: NOTIFICATION_FROM,
           to: AUTHORIZED_SENDER,
+          extraHeaders: bimiHeaders,
           subject: "Email sent From "+formatAddresses(targetFrom)+" to "+formatAddresses(targetTo)+": "+ subject,
           text: "Using the following target cc: "+ formatAddresses(targetCc) +"\ntarget bcc: "+ formatAddresses(targetBcc) +"\ntarget reply-to: "+ formatAddresses(targetReplyTo) +"\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\nattachments: "+ attachmentNames +"\nBody:\n" + cleanBody,
           html: "Using the following cc: "+ escapeHtml(formatAddresses(targetCc)) +"\n<br>\ntarget bcc: "+ escapeHtml(formatAddresses(targetBcc)) +"\n<br>\ntarget reply-to: "+ escapeHtml(formatAddresses(targetReplyTo)) +"\n<br>\nin-reply-to: "+ (targetInReplyTo ? targetInReplyTo.join(', ') : "none") +"\n<br>\nreferences: "+ (targetReferences ? targetReferences.join(', ') : "none") +"\n<br>\nattachments: "+ escapeHtml(attachmentNames) +"\n<br>\nBody:\n<br>\n" + cleanHTML,

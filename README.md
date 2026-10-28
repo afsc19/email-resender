@@ -17,6 +17,8 @@ Optional (used with their default value when not set):
   **Default:** `security` (i.e. `security@yourdomain.com`).
 - `SEND_CONFIRMATION`: Set to `true` (or `1`/`yes`) to also receive a summary email (from the `NOTIFICATION_SENDER` address) after each send, listing the recipients, cc, bcc, reply-to, thread headers and attachment names. You always get a bcc copy of the exact email that was sent, so this is only useful if you want the extra details. Attachments are listed by name, not attached again.
   **Default:** `false` (no summary email).
+- `BIMI_SELECTOR`: A BIMI selector name (e.g. `worker`). Every email the worker sends gets the header `BIMI-Selector: v=BIMI1; s=<selector>;`, so mail clients that support BIMI look up the logo at `<selector>._bimi.yourdomain.com` instead of `default._bimi.yourdomain.com`. Letters, digits and dashes, optionally dot-separated; an invalid value is ignored and logged. Receivers only honour the header if your domain's DKIM signature covers it, so add `BIMI-Selector` to your mail server's signed headers.
+  **Default:** unset (no header, receivers use `default._bimi`).
 
 Main (Resend) branch:
 - `RESEND_API_KEY`: Your API key from [Resend](https://resend.com), which is used to actually send the outgoing emails.
