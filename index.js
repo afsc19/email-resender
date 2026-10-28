@@ -82,7 +82,7 @@ export default {
       : undefined;
     const fromArray = toAddressList(from);
 
-    // envelope must match the identity to send with:
+    // identity to send with:
     // 1 - from address
     // 2 - wildcard for the domain (which is the one I use)
     // 3 - primary one [0]
@@ -91,18 +91,10 @@ export default {
       || identities.find(i => (i.email || "").toLowerCase() === "*@" + fromEmail.split('@').pop())
       || identities[0];
     const identityId = identity.id;
-    const mailFrom = identity.email && !identity.email.startsWith("*@") ? identity.email : fromArray[0].email;
     const toArray = toAddressList(to);
     const ccArray = toAddressList(cc);
     const bccArray = toAddressList(bcc);
     const replyToArray = toAddressList(replyTo);
-
-    // SMTP envelope: who it is actually delivered to.
-    // bcc only goes here, never into the email's headers, so recipients can't see it whatever the server does with Bcc
-    const rcptTo = [...(toArray || []), ...(ccArray || []), ...(bccArray || [])]
-      .map(a => a.email)
-      .filter((address, i, all) => all.findIndex(other => other.toLowerCase() === address.toLowerCase()) === i)
-      .map(address => ({ email: address }));
 
     // custom headers, e.g. { "Thread-Index": "..." } -> { "header:Thread-Index:asText": "..." }
     const extraHeaderProps = Object.fromEntries(
@@ -129,6 +121,7 @@ export default {
                 from: fromArray,
                 to: toArray,
                 ...(ccArray ? { cc: ccArray } : {}),
+                ...(bccArray ? { bcc: bccArray } : {}),
                 ...(replyToArray ? { replyTo: replyToArray } : {}),
 
                 // thread headers
@@ -156,11 +149,7 @@ export default {
             create: {
               sub1: {
                 emailId: "#msg1",
-                identityId: identityId,
-                envelope: {
-                  mailFrom: { email: mailFrom },
-                  rcptTo: rcptTo,
-                }
+                identityId: identityId
               }
             },
             // once sent: move it from drafts to sent and drop the draft flag
